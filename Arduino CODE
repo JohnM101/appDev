@@ -1,0 +1,127 @@
+#include <WiFi.h>
+#include <WebSocketsServer.h>
+
+const char* ssid = "Wiepie";
+const char* password = "12344321";
+
+// Pin Definition
+const int TRIG_A = 23; const int ECHO_A = 22;
+const int TRIG_B = 5;  const int ECHO_B = 21;
+const int LED_R_A = 19; const int LED_G_A = 18;
+const int LED_R_B = 17; const int LED_G_B = 16;
+
+// State Variables
+int regA = 0; bool activeA = false;
+int regB = 0; bool activeB = false;
+int sensitivity = 1; 
+
+int alertCountA = 0;
+int alertCountB = 0;
+
+WebSocketsServer webSocket = WebSocketsServer(81);
+unsigned long lastSensorCheck = 0;
+
+long getDistance(int trig, int echo) {
+  digitalWrite(trig, LOW); delayMicroseconds(2);
+  digitalWrite(trig, HIGH); delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+  long duration = pulseIn(echo, HIGH, 25000); 
+  if (duration == 0) return 400; 
+  return 0.01715 * duration;
+}
+
+void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  if(type == WStype_TEXT) {
+    String msg = String((char*)payload);
+    Serial.print("Command Received: "); Serial.println(msg);
+
+    if (msg == "ARM_A") {
+      activeA = true;
+      regA = getDistance(TRIG_A, ECHO_A);
+      alertCountA = 0;
+      webSocket.sendTXT(num, "LOCKED_A");
+      Serial.printf(">>> SHELF A ARMED AT: %d cm <<<\n", regA);
+    } 
+    else if (msg == "ARM_B") {
+      activeB = true;
+      regB = getDistance(TRIG_B, ECHO_B);
+      alertCountB = 0;
+      webSocket.sendTXT(num, "LOCKED_B");
+      Serial.printf(">>> SHELF B ARMED AT: %d cm <<<\n", regB);
+    } 
+    else if (msg == "DISARM_A") { 
+      activeA = false; 
+      digitalWrite(LED_R_A, LOW);
+      Serial.println("Shelf A: DISARMED");
+    }
+    else if (msg == "DISARM_B") { 
+      activeB = false; 
+      digitalWrite(LED_R_B, LOW);
+      Serial.println("Shelf B: DISARMED");
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(TRIG_A, OUTPUT); pinMode(ECHO_A, INPUT);
+  pinMode(TRIG_B, OUTPUT); pinMode(ECHO_B, INPUT);
+  pinMode(LED_R_A, OUTPUT); pinMode(LED_G_A, OUTPUT);
+  pinMode(LED_R_B, OUTPUT); pinMode(LED_G_B, OUTPUT);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting WiFi");
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  
+  webSocket.begin();
+  webSocket.onEvent(onWebSocketEvent);
+  Serial.println("\nTAMBAG ESP32 ONLINE.");
+}
+
+void loop() {
+  webSocket.loop();
+
+  // Check sensors every 200ms
+  if (millis() - lastSensorCheck > 200) { 
+    lastSensorCheck = millis();
+
+    int currA = getDistance(TRIG_A, ECHO_A);
+    int currB = getDistance(TRIG_B, ECHO_B);
+
+    // --- LIVE SCAN MONITOR (ALWAYS VISIBLE) ---
+    // This prints every 0.2 seconds to show you what the sensors see right now
+    Serial.printf("LIVE SCAN -> A: %3d cm (Target: %s) | B: %3d cm (Target: %s)\n", 
+                  currA, activeA ? String(regA).c_str() : "OFF", 
+                  currB, activeB ? String(regB).c_str() : "OFF");
+
+    // --- SHELF A LOGIC ---
+    if (activeA) {
+      digitalWrite(LED_R_A, HIGH); digitalWrite(LED_G_A, LOW);
+      if (abs(currA - regA) > sensitivity) {
+        alertCountA++;
+        if (alertCountA >= 3) {
+          webSocket.broadcastTXT("ALERT_A");
+          Serial.printf("!!!!! [ALERT] SHELF A INTRUSION: Item moved to %d cm !!!!!\n", currA);
+          alertCountA = 0;
+        }
+      } else { alertCountA = 0; }
+    } else {
+      digitalWrite(LED_R_A, LOW); digitalWrite(LED_G_A, HIGH);
+    }
+
+    // --- SHELF B LOGIC ---
+    if (activeB) {
+      digitalWrite(LED_R_B, HIGH); digitalWrite(LED_G_B, LOW);
+      if (abs(currB - regB) > sensitivity) {
+        alertCountB++;
+        if (alertCountB >= 3) {
+          webSocket.broadcastTXT("ALERT_B");
+          Serial.printf("!!!!! [ALERT] SHELF B INTRUSION: Item moved to %d cm !!!!!\n", currB);
+          alertCountB = 0;
+        }
+      } else { alertCountB = 0; }
+    } else {
+      digitalWrite(LED_R_B, LOW); digitalWrite(LED_G_B, HIGH);
+    }
+  }
+}
